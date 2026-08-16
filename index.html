@@ -1,0 +1,851 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>Classroom AI v0.1</title>
+
+<style>
+    body {
+        font-family: Arial, sans-serif;
+        background: #111;
+        color: white;
+        margin: 0;
+        padding: 15px;
+    }
+
+    h1 {
+        margin-top: 0;
+    }
+
+    .card {
+        background: #222;
+        border-radius: 15px;
+        padding: 18px;
+        margin-bottom: 15px;
+    }
+
+    button {
+        background: #444;
+        color: white;
+        border: none;
+        border-radius: 10px;
+        padding: 14px 18px;
+        margin: 4px;
+        font-size: 16px;
+    }
+
+    button:active {
+        background: #777;
+    }
+
+    .big {
+        font-size: 48px;
+        font-weight: bold;
+    }
+
+    .normal {
+        color: #7cff7c;
+    }
+
+    .warning {
+        color: #ffd35a;
+    }
+
+    .loud {
+        color: #ff7070;
+    }
+
+    .meter {
+        width: 100%;
+        height: 30px;
+        background: #444;
+        border-radius: 15px;
+        overflow: hidden;
+        margin-top: 10px;
+    }
+
+    #meterFill {
+        height: 100%;
+        width: 0%;
+        background: #7cff7c;
+        transition: width .1s;
+    }
+
+    input {
+        width: 70px;
+        font-size: 16px;
+        padding: 6px;
+    }
+
+    #log {
+        max-height: 250px;
+        overflow-y: auto;
+        font-family: monospace;
+        font-size: 13px;
+    }
+</style>
+</head>
+
+<body>
+
+<h1>🎓 Classroom AI v0.1</h1>
+
+<div class="card">
+
+<button onclick="startLesson()">START LESSON</button>
+
+<button onclick="stopLesson()">STOP</button>
+
+<button onclick="calibrate()">CALIBRATE QUIET ROOM</button>
+
+</div>
+
+
+<div class="card">
+
+<h2>Sound Level</h2>
+
+<div id="level" class="big">--</div>
+
+<div class="meter">
+    <div id="meterFill"></div>
+</div>
+
+<h2 id="status">Waiting</h2>
+
+</div>
+
+
+<div class="card">
+
+<h2>Lesson Timer</h2>
+
+<div id="timer" class="big">00:00</div>
+
+<label>
+Lesson length:
+<input id="lessonLength" type="number" value="60">
+minutes
+</label>
+
+</div>
+
+
+<div class="card">
+
+<h2>Noise Settings</h2>
+
+<p>
+Warning threshold:
+<input id="warningThreshold" type="number" value="65">
+</p>
+
+<p>
+Strong warning:
+<input id="strongThreshold" type="number" value="78">
+</p>
+
+<p>
+Noise must continue for:
+<input id="durationThreshold" type="number" value="4">
+seconds
+</p>
+
+</div>
+
+
+<div class="card">
+
+<h2>Teacher Controls</h2>
+
+<button onclick="testTone()">🔔 Test Tone</button>
+
+<button onclick="testVoice()">🗣 Test Voice</button>
+
+<button onclick="markEvent()">📝 Mark Event</button>
+
+</div>
+
+
+<div class="card">
+
+<h2>Lesson Events</h2>
+
+<div id="log"></div>
+
+</div>
+
+
+<script>
+
+let audioContext;
+
+let analyser;
+
+let microphone;
+
+let stream;
+
+let mediaRecorder;
+
+let recordedChunks = [];
+
+let lessonRunning = false;
+
+let lessonStartTime;
+
+let timerInterval;
+
+let noiseStartTime = null;
+
+let lastWarningTime = 0;
+
+let baseline = 50;
+
+
+/* =========================
+   LOGGING
+========================= */
+
+function logEvent(message) {
+
+    const log = document.getElementById("log");
+
+    const time =
+        new Date().toLocaleTimeString();
+
+    log.innerHTML +=
+        "<div>" +
+        time +
+        " — " +
+        message +
+        "</div>";
+
+    log.scrollTop = log.scrollHeight;
+}
+
+
+/* =========================
+   START LESSON
+========================= */
+
+async function startLesson() {
+
+    try {
+
+        stream =
+            await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    echoCancellation: false,
+                    noiseSuppression: false,
+                    autoGainControl: false
+                }
+            });
+
+        audioContext =
+            new (window.AudioContext ||
+                 window.webkitAudioContext)();
+
+        analyser =
+            audioContext.createAnalyser();
+
+        analyser.fftSize = 2048;
+
+        microphone =
+            audioContext.createMediaStreamSource(stream);
+
+        microphone.connect(analyser);
+
+
+        /* Recording */
+
+        recordedChunks = [];
+
+        mediaRecorder =
+            new MediaRecorder(stream);
+
+        mediaRecorder.ondataavailable =
+            function(event) {
+
+                if (event.data.size > 0) {
+
+                    recordedChunks.push(event.data);
+
+                }
+
+            };
+
+
+        mediaRecorder.start();
+
+
+        lessonRunning = true;
+
+        lessonStartTime = Date.now();
+
+        logEvent("LESSON STARTED");
+
+        startTimer();
+
+        monitorSound();
+
+    }
+
+    catch(error) {
+
+        alert(
+            "Microphone access failed: " +
+            error.message
+        );
+
+    }
+
+}
+
+
+/* =========================
+   STOP LESSON
+========================= */
+
+function stopLesson() {
+
+    lessonRunning = false;
+
+    clearInterval(timerInterval);
+
+
+    if (mediaRecorder &&
+        mediaRecorder.state !== "inactive") {
+
+        mediaRecorder.stop();
+
+        mediaRecorder.onstop =
+            function() {
+
+                const blob =
+                    new Blob(
+                        recordedChunks,
+                        { type: "audio/webm" }
+                    );
+
+                const url =
+                    URL.createObjectURL(blob);
+
+                const link =
+                    document.createElement("a");
+
+                link.href = url;
+
+                link.download =
+                    "classroom-lesson-" +
+                    Date.now() +
+                    ".webm";
+
+                link.textContent =
+                    "⬇ Download Lesson Recording";
+
+                link.style.display = "block";
+
+                link.style.marginTop = "15px";
+
+                document
+                    .querySelector(".card:last-child")
+                    .appendChild(link);
+
+            };
+
+    }
+
+
+    if (stream) {
+
+        stream
+            .getTracks()
+            .forEach(track => track.stop());
+
+    }
+
+
+    document.getElementById("status")
+        .textContent = "Stopped";
+
+    logEvent("LESSON STOPPED");
+
+}
+
+
+/* =========================
+   SOUND MEASUREMENT
+========================= */
+
+function getSoundLevel() {
+
+    const buffer =
+        new Float32Array(
+            analyser.fftSize
+        );
+
+    analyser.getFloatTimeDomainData(buffer);
+
+    let sum = 0;
+
+    for (let i = 0; i < buffer.length; i++) {
+
+        sum += buffer[i] * buffer[i];
+
+    }
+
+    const rms =
+        Math.sqrt(
+            sum / buffer.length
+        );
+
+    /*
+       This is NOT calibrated dB SPL.
+
+       It is a relative classroom
+       loudness measurement.
+    */
+
+    let level =
+        20 *
+        Math.log10(
+            Math.max(rms, 0.00001)
+        ) +
+        100;
+
+    level =
+        Math.max(
+            0,
+            Math.min(
+                100,
+                level
+            )
+        );
+
+    return level;
+
+}
+
+
+/* =========================
+   SOUND MONITOR
+========================= */
+
+function monitorSound() {
+
+    if (!lessonRunning) {
+
+        return;
+
+    }
+
+
+    const level =
+        getSoundLevel();
+
+
+    document.getElementById("level")
+        .textContent =
+        level.toFixed(1);
+
+
+    document.getElementById("meterFill")
+        .style.width =
+        level + "%";
+
+
+    const warning =
+        Number(
+            document.getElementById(
+                "warningThreshold"
+            ).value
+        );
+
+
+    const strong =
+        Number(
+            document.getElementById(
+                "strongThreshold"
+            ).value
+        );
+
+
+    const duration =
+        Number(
+            document.getElementById(
+                "durationThreshold"
+            ).value
+        );
+
+
+    const status =
+        document.getElementById("status");
+
+
+    if (level >= warning) {
+
+        if (!noiseStartTime) {
+
+            noiseStartTime =
+                Date.now();
+
+        }
+
+
+        const noisyFor =
+            (
+                Date.now() -
+                noiseStartTime
+            ) / 1000;
+
+
+        if (level >= strong) {
+
+            status.textContent =
+                "🔴 LOUD";
+
+            status.className =
+                "loud";
+
+        }
+
+        else {
+
+            status.textContent =
+                "🟡 ELEVATED";
+
+            status.className =
+                "warning";
+
+        }
+
+
+        /*
+           Don't repeatedly nag the class.
+        */
+
+        if (
+            noisyFor >= duration &&
+            Date.now() - lastWarningTime > 12000
+        ) {
+
+            warningIntervention(
+                level >= strong
+            );
+
+            lastWarningTime =
+                Date.now();
+
+            noiseStartTime = null;
+
+        }
+
+    }
+
+    else {
+
+        noiseStartTime = null;
+
+        status.textContent =
+            "🟢 NORMAL";
+
+        status.className =
+            "normal";
+
+    }
+
+
+    requestAnimationFrame(
+        monitorSound
+    );
+
+}
+
+
+/* =========================
+   NOISE INTERVENTION
+========================= */
+
+function warningIntervention(strong) {
+
+    testTone();
+
+
+    if (strong) {
+
+        speak(
+            "The classroom is getting too loud. Please bring the noise level down."
+        );
+
+        logEvent(
+            "STRONG NOISE WARNING"
+        );
+
+    }
+
+    else {
+
+        speak(
+            "Let's bring the noise level down a little."
+        );
+
+        logEvent(
+            "NOISE WARNING"
+        );
+
+    }
+
+}
+
+
+/* =========================
+   VOICE
+========================= */
+
+function speak(text) {
+
+    if (!("speechSynthesis" in window)) {
+
+        return;
+
+    }
+
+
+    speechSynthesis.cancel();
+
+
+    const utterance =
+        new SpeechSynthesisUtterance(
+            text
+        );
+
+
+    utterance.rate = 0.95;
+
+    utterance.volume = 1;
+
+
+    speechSynthesis.speak(
+        utterance
+    );
+
+}
+
+
+/* =========================
+   TEST VOICE
+========================= */
+
+function testVoice() {
+
+    speak(
+        "This is the Classroom AI voice test."
+    );
+
+}
+
+
+/* =========================
+   WARNING TONE
+========================= */
+
+function testTone() {
+
+    if (!audioContext) {
+
+        return;
+
+    }
+
+
+    const oscillator =
+        audioContext.createOscillator();
+
+    const gain =
+        audioContext.createGain();
+
+
+    oscillator.frequency.value =
+        880;
+
+
+    gain.gain.value =
+        0.15;
+
+
+    oscillator.connect(gain);
+
+    gain.connect(
+        audioContext.destination
+    );
+
+
+    oscillator.start();
+
+    oscillator.stop(
+        audioContext.currentTime + 0.2
+    );
+
+}
+
+
+/* =========================
+   CALIBRATION
+========================= */
+
+async function calibrate() {
+
+    if (!analyser) {
+
+        alert(
+            "Start the lesson first."
+        );
+
+        return;
+
+    }
+
+
+    logEvent(
+        "CALIBRATING — EVERYONE BE QUIET"
+    );
+
+
+    let readings = [];
+
+    const start =
+        Date.now();
+
+
+    while (
+        Date.now() - start <
+        5000
+    ) {
+
+        readings.push(
+            getSoundLevel()
+        );
+
+
+        await new Promise(
+            resolve =>
+                setTimeout(
+                    resolve,
+                    100
+                )
+        );
+
+    }
+
+
+    baseline =
+        readings.reduce(
+            (a,b) => a+b,
+            0
+        ) /
+        readings.length;
+
+
+    document.getElementById(
+        "warningThreshold"
+    ).value =
+        Math.round(
+            baseline + 10
+        );
+
+
+    document.getElementById(
+        "strongThreshold"
+    ).value =
+        Math.round(
+            baseline + 20
+        );
+
+
+    logEvent(
+        "QUIET BASELINE: " +
+        baseline.toFixed(1)
+    );
+
+
+    speak(
+        "Calibration complete."
+    );
+
+}
+
+
+/* =========================
+   TIMER
+========================= */
+
+function startTimer() {
+
+    timerInterval =
+        setInterval(
+            function() {
+
+                if (!lessonRunning) {
+
+                    return;
+
+                }
+
+
+                const seconds =
+                    Math.floor(
+                        (
+                            Date.now() -
+                            lessonStartTime
+                        ) / 1000
+                    );
+
+
+                const minutes =
+                    Math.floor(
+                        seconds / 60
+                    );
+
+
+                const remainingSeconds =
+                    seconds % 60;
+
+
+                document.getElementById(
+                    "timer"
+                ).textContent =
+                    String(minutes)
+                        .padStart(2,"0")
+                    +
+                    ":"
+                    +
+                    String(
+                        remainingSeconds
+                    ).padStart(2,"0");
+
+            },
+            250
+        );
+
+}
+
+
+/* =========================
+   MANUAL EVENT
+========================= */
+
+function markEvent() {
+
+    logEvent(
+        "TEACHER MARKED EVENT"
+    );
+
+}
+
+</script>
+
+</body>
+</html>
